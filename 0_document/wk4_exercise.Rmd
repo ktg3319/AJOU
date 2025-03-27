@@ -22,11 +22,6 @@ aus_livestock
 glimpse(aus_livestock)
 ```
 
-```{r, include=FALSE}
-# Data check (3)
-plot(aus_livestock)
-```
-
 ### 1. Data filtering
 
 ```{r}
@@ -44,6 +39,7 @@ pigs_1990_1995 <- aus_livestock %>%
 ```
 
 ```{r,include=FALSE}
+plot(aus_livestock)
 plot(pigs_1990_1995)
 ```
 
