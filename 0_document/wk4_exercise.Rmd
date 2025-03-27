@@ -1,6 +1,6 @@
 ---
 title: "wk4_exercise"
-author: "kim jisu, kim tae-gun"
+author: "kim jisu, kim tae-geon"
 date: "2025-03-27"
 output: html_document
 ---
