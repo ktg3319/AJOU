@@ -1,0 +1,90 @@
+---
+title: "wk4_exercise"
+author: "kim jisu, kim tae-gun"
+date: "2025-03-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+source(here("source","get_lib.R"))
+```
+
+```{r, include=FALSE}
+# Data check (1)
+aus_livestock
+```
+
+```{r, include=FALSE}
+# Data check (2)
+glimpse(aus_livestock)
+```
+
+```{r, include=FALSE}
+# Data check (3)
+plot(aus_livestock)
+```
+
+### 1. Data filtering
+
+```{r}
+pigs <- aus_livestock %>% 
+  filter(Animal == "Pigs", 
+         State == "Victoria"
+         )
+
+pigs_1990_1995 <- aus_livestock %>% 
+  filter(Animal == "Pigs", 
+         State == "Victoria",
+         year(Month) >= 1990, 
+         year(Month) <= 1995
+         )
+```
+
+```{r,include=FALSE}
+plot(pigs_1990_1995)
+```
+
+### 2. Perform `act()` function
+
+```{r}
+p1 <- acf(pigs_1990_1995)
+
+p2 <- acf(pigs)
+```
+
+```{r}
+# pacf
+pacf(pigs_1990_1995)
+pacf(pigs)
+```
+
+### 3. Perform `autoplot()` function
+
+```{r}
+autoplot(pigs_1990_1995, Count) +
+  labs(y = "Number of pig slaughters",
+       title = "Number of pig slaughters in Victoria from 1990 to 1995")
+
+autoplot(pigs, Count) +
+  labs(y = "Number of pig slaughters",
+       title = "Number of pig slaughters in Victoria")
+```
+
+This plot shows that more and more pigs were slaughtered from 1990 to 1995.
+
+### 4. Differences with "White noise"
+
+White noise is random data, and unlike data "pigs_1990_1995" and "pigs" where trends are evident, no regularities can be found.
+
+```{r}
+set.seed(30)
+y <- tsibble(sample = 1:50, wn = rnorm(50), index = sample)
+y %>%  autoplot(wn) + labs(title = "White noise", y = "")
+
+y %>% 
+  ACF(wn) %>% 
+  autoplot() + labs(title = "White noise")
+```
