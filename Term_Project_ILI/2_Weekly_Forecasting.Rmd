@@ -1,0 +1,429 @@
+---
+title: "ILITOTAL Weekly analysis"
+author: "jisu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+# (1) 라이브러리 로드
+library(tsibble)
+library(fable)
+library(fable.prophet)
+library(feasts)      # TSLM + 시계열 도구
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+
+library(here)
+source(here("source","get_fpp3.R"))
+source(here("source","get_lib.R"))
+```
+
+```{r}
+# (2) 폴더 구조 확인 및 생성
+cat("===== 1) 폴더 구조 확인 및 생성 =====\n")
+
+analysis_dir <- here("_2025_ILI_ANALYSIS")
+if (!dir.exists(analysis_dir)) {
+  cat("1단계: '_2025_ILI_ANALYSIS' 폴더가 없습니다. 폴더를 생성합니다...\n")
+  dir.create(analysis_dir, recursive = TRUE)
+} else {
+  cat("1단계: '_2025_ILI_ANALYSIS' 폴더가 이미 존재합니다.\n")
+}
+
+model_dir <- here("_2025_ILI_ANALYSIS", "02_model")
+if (!dir.exists(model_dir)) {
+  cat("2단계: '_2025_ILI_ANALYSIS/02_model' 폴더가 없습니다. 폴더를 생성합니다...\n")
+  dir.create(model_dir, recursive = TRUE)
+} else {
+  cat("2단계: '_2025_ILI_ANALYSIS/02_model' 폴더가 이미 존재합니다.\n")
+}
+
+result_dir <- here("_2025_ILI_ANALYSIS", "03_result")
+if (!dir.exists(result_dir)) {
+  cat("결과 CSV를 저장할 '03_result' 폴더가 없습니다. 폴더를 생성합니다...\n")
+  dir.create(result_dir, recursive = TRUE)
+} else {
+  cat("'03_result' 폴더가 이미 존재합니다.\n")
+}
+
+vis_dir <- here("_2025_ILI_ANALYSIS", "04_visualization")
+if (!dir.exists(vis_dir)) {
+  cat("시각화 이미지를 저장할 '04_visualization' 폴더가 없습니다. 폴더를 생성합니다...\n")
+  dir.create(vis_dir, recursive = TRUE)
+} else {
+  cat("'04_visualization' 폴더가 이미 존재합니다.\n")
+}
+
+################################################################################
+# (3) 데이터 로드 (기존 코드 context)
+################################################################################
+
+cat("===== 2) 데이터 로드 (기존 코드 context) =====\n")
+
+train_data <- read_csv(here("_2025_ILI_ANALYSIS","01_data","ili_train_data.csv")) %>%
+  mutate(DATE = as.Date(DATE)) %>%
+  as_tsibble(index = DATE)
+
+test_data <- read_csv(here("_2025_ILI_ANALYSIS","01_data","ili_test_data.csv")) %>%
+  mutate(DATE = as.Date(DATE)) %>%
+  as_tsibble(index = DATE)
+
+# 기존 코드 상정: initial_data 가 별도로 정의되어 있다고 가정
+# 여기서는 train_data 전체를 initial_data 로 간주
+initial_data <- train_data
+
+cat(" - train_data, test_data 로드 완료\n")
+
+################################################################################
+# (4) 모델별 rds 파일 확인 & Rolling Forecast (Base Only)
+################################################################################
+
+cat("===== 3) 모델별 RDS 파일 확인 & Rolling Forecast =====\n")
+
+# 모델별 RDS 저장 경로
+model_file_ARIMA    <- here("_2025_ILI_ANALYSIS","02_model","trained_model_ARIMA.rds")
+model_file_ETS      <- here("_2025_ILI_ANALYSIS","02_model","trained_model_ETS.rds")
+model_file_PROPHET  <- here("_2025_ILI_ANALYSIS","02_model","trained_model_PROPHET.rds")
+model_file_ENSEMBLE <- here("_2025_ILI_ANALYSIS","02_model","trained_model_ENSEMBLE.rds")
+
+# 예측 결과 저장용 변수(벡터) 및 날짜 초기화
+predicted_ARIMA      <- numeric()
+predicted_ETS        <- numeric()
+predicted_PROPHET    <- numeric()
+predicted_ENSEMBLE   <- numeric()
+predicted_dates      <- as.Date(character())
+
+#--------------------------------------------------------------------------------------------------
+# (4-1) 모델별 Rolling Forecast 수행 함수
+#--------------------------------------------------------------------------------------------------
+run_rolling_forecast <- function(model_type, train_data, test_data, rds_path) {
+  # model_type: "ARIMA", "ETS", "PROPHET", "ENSEMBLE"
+  # return: list(predictions = numeric vector, dates = date vector)
+
+  if (file.exists(rds_path)) {
+    cat("   -", model_type, "모델: '", basename(rds_path),
+        "' 파일이 이미 존재합니다. 학습을 스킵하고 불러옵니다...\n")
+    loaded <- readRDS(rds_path)
+    return(
+      list(
+        predictions = loaded$predictions,
+        dates       = loaded$dates
+      )
+    )
+  } else {
+    cat("   -", model_type, "모델: '", basename(rds_path),
+        "' 파일이 없습니다. Rolling Forecast를 새로 진행합니다...\n")
+
+    # (a) Rolling Forecast 준비
+    horizon   <- nrow(test_data)
+    pred_vec  <- numeric()            # 예측 결과 저장용
+    date_vec  <- as.Date(character()) # 예측 날짜 저장용
+    tmp_train <- train_data           # for-loop 내에서 점차 업데이트될 train_data
+
+    # (b) Rolling forecast
+    for (i in seq_len(horizon)) {
+      if (i %% 10 == 1) {
+        cat("     ...", model_type, "모델 Rolling Forecast 진행중. i =", i, "\n")
+      }
+
+      # (b1) 현재까지의 train_data로 모델 적합
+      fitted_model <- NULL
+      if (model_type == "ARIMA") {
+        fitted_model <- tmp_train %>%
+          model(MODEL = ARIMA(ILITOTAL, stepwise = FALSE, approximation = FALSE))
+      } else if (model_type == "ETS") {
+        fitted_model <- tmp_train %>%
+          model(MODEL = ETS(ILITOTAL))
+      } else if (model_type == "PROPHET") {
+        fitted_model <- tmp_train %>%
+          model(MODEL = prophet(ILITOTAL))
+      } else if (model_type == "ENSEMBLE") {
+        fitted_model <- tmp_train %>%
+          model(MODEL = combination_model(
+            ARIMA(ILITOTAL, stepwise = FALSE, approximation = FALSE),
+            ETS(ILITOTAL),
+            prophet(ILITOTAL),
+            weights = "equal"
+          ))
+      }
+
+      # (b2) 한 스텝 예측
+      fc <- fitted_model %>% forecast(h = 1)
+      next_val <- fc %>%
+        as_tibble() %>%
+        pull(.mean)
+
+      # (b3) 실제로 예측하고자 하는 날짜(= test_data의 i번째 DATE)
+      next_DATE <- test_data$DATE[i]
+
+      # (b4) 예측 결과 저장
+      pred_vec <- c(pred_vec, next_val)
+      date_vec <- c(date_vec, next_DATE)
+
+      # (b5) 모델 업데이트용: 실제값을 train_data에 추가
+      actual_value <- test_data$ILITOTAL[i]
+      new_row <- tibble(
+        DATE = next_DATE,
+        ILITOTAL = actual_value
+      )
+      tmp_train <- bind_rows(tmp_train, new_row) %>%
+        arrange(DATE)
+    }
+
+    cat("     ...", model_type, "Rolling Forecast 완료!\n")
+
+    # (b6) RDS 저장
+    saveRDS(
+      list(
+        predictions = pred_vec,
+        dates       = date_vec
+      ),
+      file = rds_path
+    )
+    cat("     ... RDS 파일 생성 완료:", basename(rds_path), "\n")
+
+    return(
+      list(
+        predictions = pred_vec,
+        dates       = date_vec
+      )
+    )
+  }
+}
+
+#--------------------------------------------------------------------------------------------------
+# (4-2) 4개 모델 각각에 대해 Rolling Forecast 결과 확보
+#--------------------------------------------------------------------------------------------------
+cat("3단계: 모델별 Rolling Forecast를 확인/진행합니다.\n")
+
+arima_res    <- run_rolling_forecast("ARIMA", train_data, test_data, model_file_ARIMA)
+ets_res      <- run_rolling_forecast("ETS", train_data, test_data, model_file_ETS)
+prophet_res  <- run_rolling_forecast("PROPHET", train_data, test_data, model_file_PROPHET)
+ensemble_res <- run_rolling_forecast("ENSEMBLE", train_data, test_data, model_file_ENSEMBLE)
+
+#--------------------------------------------------------------------------------------------------
+# (4-3) 최종 predicted_test 테이블 구성
+#--------------------------------------------------------------------------------------------------
+cat("3단계: 모델별 예측 결과를 하나의 predicted_test로 합칩니다.\n")
+
+# (a) 공통의 날짜 벡터 (test_data DATE 순서대로)
+predicted_dates <- test_data$DATE
+
+# (b) 예측 벡터
+predicted_ARIMA    <- arima_res$predictions
+predicted_ETS      <- ets_res$predictions
+predicted_PROPHET  <- prophet_res$predictions
+predicted_ENSEMBLE <- ensemble_res$predictions
+
+predicted_test <- tibble(
+  DATE            = predicted_dates,
+  fitted_ARIMA    = predicted_ARIMA,
+  fitted_ETS      = predicted_ETS,
+  fitted_PROPHET  = predicted_PROPHET,
+  fitted_ENSEMBLE = predicted_ENSEMBLE,
+  fitted_AVG      = (predicted_ARIMA + predicted_ETS + predicted_PROPHET) / 3
+)
+
+cat(" - 예측 결과(predicted_test) 상위 5행 미리보기:\n")
+print(head(predicted_test, 5))
+
+#--------------------------------------------------------------------------------------------------
+# (4-4) 실제값과 결합하여 accuracy 계산
+#--------------------------------------------------------------------------------------------------
+evaluation_data <- test_data %>%
+  left_join(predicted_test, by = "DATE")
+
+accuracy_result <- evaluation_data %>%
+  summarise(
+    MAE_ARIMA     = mean(abs(ILITOTAL - fitted_ARIMA), na.rm = TRUE),
+    MAE_ETS       = mean(abs(ILITOTAL - fitted_ETS), na.rm = TRUE),
+    MAE_PROPHET   = mean(abs(ILITOTAL - fitted_PROPHET), na.rm = TRUE),
+    MAE_ENSEMBLE  = mean(abs(ILITOTAL - fitted_ENSEMBLE), na.rm = TRUE),
+    MAE_AVG       = mean(abs(ILITOTAL - fitted_AVG), na.rm = TRUE)
+)
+
+cat("\n=== 성능 평가 결과 (accuracy_result) ===\n")
+print(accuracy_result)
+
+################################################################################
+# (5) 예측 결과 및 accuracy CSV 저장
+################################################################################
+
+cat("===== 4) 예측 결과 및 평가 결과 CSV 저장 =====\n")
+
+# (5-1) predicted_test_base.csv 저장
+predicted_test_base <- evaluation_data %>%
+  select(DATE, ILITOTAL,
+         fitted_ARIMA, fitted_ETS, fitted_PROPHET, fitted_ENSEMBLE, fitted_AVG)
+
+write_csv(predicted_test_base,
+          file = file.path(result_dir, "predicted_test_base.csv"))
+cat(" - 'predicted_test_base.csv' 저장 완료\n")
+
+# (5-2) accuracy_result_base.csv 저장
+write_csv(accuracy_result,
+          file = file.path(result_dir, "accuracy_result_base.csv"))
+cat(" - 'accuracy_result_base.csv' 저장 완료\n")
+
+################################################################################
+# (6) 최종 시각화(검은 점 vs 모델 라인)
+################################################################################
+
+cat("===== 5) 최종 시각화(검은 점 vs 모델 라인) =====\n")
+
+eval_long <- evaluation_data %>%
+  select(DATE, ILITOTAL, fitted_ARIMA, fitted_ETS, fitted_PROPHET, fitted_ENSEMBLE, fitted_AVG) %>%
+  pivot_longer(
+    cols = starts_with("fitted_"),
+    names_to = "Model",
+    values_to = "Fitted"
+  )
+
+plt <- ggplot(eval_long, aes(x = DATE)) +
+  geom_point(aes(y = ILITOTAL), color = "black", size = 1.5, shape = 16) +
+  geom_line(aes(y = Fitted, color = Model), size = 1) +
+  labs(
+    title = "Actual vs Fitted (Base only)",
+    y = "ILITOTAL", color = "Model"
+  ) +
+  theme_minimal()
+
+print(plt)
+
+ggsave(
+  filename = file.path(vis_dir, "base_vs_fitted.png"),
+  plot = plt,
+  width = 10, height = 6, bg = "white"
+)
+cat(" - 시각화 완료 및 'base_vs_fitted.png' 저장\n")
+
+
+################################################################################
+# (4-5) 추가 2025년 2~5월 예측 (비-롤링) & 확장 시각화
+################################################################################
+
+cat("\n===== 6) 2025년 2~5월 주간 예측 (비-롤링) + 확장 시각화 =====\n")
+
+# (a) test_data까지 포함한 전체 데이터 결합
+final_data <- bind_rows(train_data, test_data) %>%
+  arrange(DATE)
+
+# test_data 마지막 날짜 (예: 2025-01-20)
+last_test_date <- max(test_data$DATE, na.rm = TRUE)
+
+# 2025-05 말까지 예측 (필요 시 날짜 변경 가능)
+forecast_end_date <- as.Date("2025-05-26")
+
+# 마지막 날짜와 forecast_end_date 간의 주(week) 차이 계산
+horizon_weeks <- as.numeric(difftime(forecast_end_date, last_test_date, units = "weeks"))
+horizon_weeks <- ceiling(horizon_weeks)
+
+cat(sprintf(" - test_data 마지막 날짜: %s\n", last_test_date))
+cat(sprintf(" - 예측 종료 희망 날짜:    %s\n", forecast_end_date))
+cat(sprintf(" - 약 %d주를 추가 예측 (비-롤링)\n", horizon_weeks))
+
+# (b) 전체 데이터(final_data)로 모델 적합 & horizon_weeks만큼 한 번에 예측
+cat("   - ARIMA 모델 최종 학습 후 예측\n")
+final_fit_ARIMA <- final_data %>%
+  model(ARIMA(ILITOTAL, stepwise = FALSE, approximation = FALSE))
+future_fc_ARIMA <- final_fit_ARIMA %>% forecast(h = horizon_weeks)
+
+cat("   - ETS 모델 최종 학습 후 예측\n")
+final_fit_ETS <- final_data %>%
+  model(ETS(ILITOTAL))
+future_fc_ETS <- final_fit_ETS %>% forecast(h = horizon_weeks)
+
+cat("   - PROPHET 모델 최종 학습 후 예측\n")
+final_fit_PROPHET <- final_data %>%
+  model(prophet(ILITOTAL))
+future_fc_PROPHET <- final_fit_PROPHET %>% forecast(h = horizon_weeks)
+
+cat("   - ENSEMBLE 모델 최종 학습 후 예측\n")
+final_fit_ENSEMBLE <- final_data %>%
+  model(
+    combination_model(
+      ARIMA(ILITOTAL, stepwise = FALSE, approximation = FALSE),
+      ETS(ILITOTAL),
+      prophet(ILITOTAL),
+      weights = "equal"
+    )
+  )
+future_fc_ENSEMBLE <- final_fit_ENSEMBLE %>% forecast(h = horizon_weeks)
+
+# (c) 예측 결과 합치기 (ILITOTAL=NA, fitted_XXX = 예측치)
+future_arima <- future_fc_ARIMA %>%
+  as_tibble() %>%
+  select(DATE, .mean) %>%
+  rename(fitted_ARIMA = .mean)
+
+future_ets <- future_fc_ETS %>%
+  as_tibble() %>%
+  select(DATE, .mean) %>%
+  rename(fitted_ETS = .mean)
+
+future_prophet <- future_fc_PROPHET %>%
+  as_tibble() %>%
+  select(DATE, .mean) %>%
+  rename(fitted_PROPHET = .mean)
+
+future_ensemble <- future_fc_ENSEMBLE %>%
+  as_tibble() %>%
+  select(DATE, .mean) %>%
+  rename(fitted_ENSEMBLE = .mean)
+
+future_merged <- future_arima %>%
+  left_join(future_ets, by = "DATE") %>%
+  left_join(future_prophet, by = "DATE") %>%
+  left_join(future_ensemble, by = "DATE") %>%
+  mutate(
+    ILITOTAL   = NA_real_,
+    fitted_AVG = (fitted_ARIMA + fitted_ETS + fitted_PROPHET) / 3
+  ) %>%
+  select(DATE, ILITOTAL, fitted_ARIMA, fitted_ETS,
+         fitted_PROPHET, fitted_ENSEMBLE, fitted_AVG)
+
+cat("\n - 추가 예측 (2025-02 ~ 2025-05) 결과 상위 행:\n")
+print(head(future_merged, 5))
+
+# (d) 기존 predicted_test_base와 합쳐 최종 확장 테이블 => CSV
+predicted_test_extended <- bind_rows(predicted_test_base, future_merged) %>%
+  arrange(DATE)
+
+write_csv(predicted_test_extended,
+          file = file.path(result_dir, "predicted_test_base_extended.csv"))
+cat(" - 'predicted_test_base_extended.csv' 저장 완료\n")
+
+# (e) 확장 시각화
+#     - ILITOTAL이 있는 구간(실제값) + 미래 구간(NA) 모두 한 그래프에 표시
+cat(" - 확장 구간 포함하여 시각화 진행...\n")
+
+eval_long_extended <- predicted_test_extended %>%
+  pivot_longer(
+    cols = starts_with("fitted_"),
+    names_to = "Model",
+    values_to = "Fitted"
+  )
+
+plt_extended <- ggplot(eval_long_extended, aes(x = DATE)) +
+  geom_point(aes(y = ILITOTAL), color = "black", size = 1.5, shape = 16, na.rm = TRUE) +
+  geom_line(aes(y = Fitted, color = Model), size = 1, na.rm = TRUE) +
+  labs(
+    title = "Actual vs Fitted (Extended to 2025-05)",
+    y = "ILITOTAL", color = "Model"
+  ) +
+  theme_minimal()
+
+print(plt_extended)
+
+ggsave(
+  filename = file.path(vis_dir, "extended_forecast.png"),
+  plot = plt_extended,
+  width = 10, height = 6, bg = "white"
+)
+
+cat(" - 확장 시각화 완료 및 'extended_forecast.png' 저장\n\n")
+```

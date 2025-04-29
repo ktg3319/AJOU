@@ -1,0 +1,172 @@
+---
+title:  "ILITOTAL Monthly analysis (from Weekly results)"
+author: "jisu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## ILITOTAL Monthly analysis (from Weekly results)
+
+```{r}
+# (1) 라이브러리 로드
+library(dplyr)
+library(readr)
+library(lubridate)
+library(tsibble)
+library(ggplot2)
+library(tidyr)
+library(here)
+
+################################################################################
+# (2) 폴더 구조 확인 & 생성 (Monthly용)
+################################################################################
+
+cat("===== 1) 월별 분석 폴더 구조 확인 및 생성 =====\n")
+
+analysis_dir_m <- here("_2025_ILI_ANALYSIS_MONTHLY")
+if (!dir.exists(analysis_dir_m)) {
+  cat("1단계: '_2025_ILI_ANALYSIS_MONTHLY' 폴더가 없습니다. 폴더를 생성합니다...\n")
+  dir.create(analysis_dir_m, recursive = TRUE)
+} else {
+  cat("1단계: '_2025_ILI_ANALYSIS_MONTHLY' 폴더가 이미 존재합니다.\n")
+}
+
+result_dir_m <- file.path(analysis_dir_m, "03_result_m")
+if (!dir.exists(result_dir_m)) {
+  cat("결과 CSV를 저장할 '03_result_m' 폴더가 없습니다. 폴더를 생성합니다...\n")
+  dir.create(result_dir_m, recursive = TRUE)
+} else {
+  cat("'03_result_m' 폴더가 이미 존재합니다.\n")
+}
+
+vis_dir_m <- file.path(analysis_dir_m, "04_visualization_m")
+if (!dir.exists(vis_dir_m)) {
+  cat("시각화 이미지를 저장할 '04_visualization_m' 폴더가 없습니다. 폴더를 생성합니다...\n")
+  dir.create(vis_dir_m, recursive = TRUE)
+} else {
+  cat("'04_visualization_m' 폴더가 이미 존재합니다.\n")
+}
+
+################################################################################
+# (3) Weekly 예측 결과(주간) 로드
+################################################################################
+
+cat("===== 2) Weekly 예측 결과 CSV 로드 =====\n")
+
+# 이미 Weekly 분석 코드에서 생성된 CSV 파일 (실제값 + 모델별 주간 예측치)
+# 예: 'predicted_test_base.csv' (DATE, ILITOTAL, fitted_ARIMA, ...)
+weekly_file <- here("_2025_ILI_ANALYSIS", "03_result", "predicted_test_base.csv")
+if (!file.exists(weekly_file)) {
+  stop("Weekly 결과 파일(", weekly_file, ")이 존재하지 않습니다. 먼저 Weekly 분석을 수행하세요.")
+}
+
+weekly_data <- read_csv(weekly_file) %>%
+  mutate(DATE = as.Date(DATE))  # 혹시 날짜 컬럼이 character라면 변환
+
+cat(" - Weekly 예측 데이터 상위 5행:\n")
+print(head(weekly_data, 5))
+
+################################################################################
+# (4) 주간 결과를 월별 평균으로 집계
+################################################################################
+
+cat("===== 3) 주간 -> 월간(평균) 집계 =====\n")
+
+monthly_data_m <- weekly_data %>%
+  mutate(DATE_m = floor_date(DATE, unit = "month")) %>%
+  group_by(DATE_m) %>%
+  summarise(
+    # 실제값(ILITOTAL)을 월 단위로 '평균'
+    ILITOTAL_m        = mean(ILITOTAL, na.rm = TRUE),
+    fitted_ARIMA_m    = mean(fitted_ARIMA, na.rm = TRUE),
+    fitted_ETS_m      = mean(fitted_ETS, na.rm = TRUE),
+    fitted_PROPHET_m  = mean(fitted_PROPHET, na.rm = TRUE),
+    fitted_ENSEMBLE_m = mean(fitted_ENSEMBLE, na.rm = TRUE),
+    fitted_AVG_m      = mean(fitted_AVG, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+cat(" - 월별 평균 집계 완료\n")
+cat(" - 상위 5행 미리보기:\n")
+print(head(monthly_data_m, 5))
+
+################################################################################
+# (5) Monthly 평가 지표(MAE) 계산
+################################################################################
+
+cat("===== 4) Monthly 오차 계산 (예: MAE) =====\n")
+
+accuracy_result_m <- monthly_data_m %>%
+  summarise(
+    MAE_ARIMA_m     = mean(abs(ILITOTAL_m - fitted_ARIMA_m), na.rm = TRUE),
+    MAE_ETS_m       = mean(abs(ILITOTAL_m - fitted_ETS_m), na.rm = TRUE),
+    MAE_PROPHET_m   = mean(abs(ILITOTAL_m - fitted_PROPHET_m), na.rm = TRUE),
+    MAE_ENSEMBLE_m  = mean(abs(ILITOTAL_m - fitted_ENSEMBLE_m), na.rm = TRUE),
+    MAE_AVG_m       = mean(abs(ILITOTAL_m - fitted_AVG_m), na.rm = TRUE)
+  )
+
+cat(" - accuracy_result_m:\n")
+print(accuracy_result_m)
+
+################################################################################
+# (6) CSV 저장
+################################################################################
+
+cat("===== 5) Monthly 결과 CSV 저장 =====\n")
+
+# (6-1) 월별 예측 결과 CSV
+monthly_file_m <- file.path(result_dir_m, "predicted_test_base_m_from_weekly.csv")
+write_csv(monthly_data_m, monthly_file_m)
+cat(" -", monthly_file_m, " 저장 완료\n")
+
+# (6-2) 월별 평가 결과 CSV
+accuracy_file_m <- file.path(result_dir_m, "accuracy_result_base_m_from_weekly.csv")
+write_csv(accuracy_result_m, accuracy_file_m)
+cat(" -", accuracy_file_m, " 저장 완료\n")
+
+################################################################################
+# (7) 시각화(월별 실제값 vs. 예측값)
+################################################################################
+
+cat("===== 6) 월별 시각화 =====\n")
+
+monthly_long_m <- monthly_data_m %>%
+  select(DATE_m, ILITOTAL_m, fitted_ARIMA_m, fitted_ETS_m, 
+         fitted_PROPHET_m, fitted_ENSEMBLE_m, fitted_AVG_m) %>%
+  pivot_longer(
+    cols = starts_with("fitted_"),
+    names_to = "Model_m",
+    values_to = "Fitted_m"
+  )
+
+plt_m <- ggplot(monthly_long_m, aes(x = DATE_m)) +
+  geom_point(aes(y = ILITOTAL_m), color = "black", size = 2, shape = 16) +
+  geom_line(aes(y = Fitted_m, color = Model_m), size = 1) +
+  labs(
+    title = "Monthly Actual vs. Predicted (averaged from Weekly)",
+    y = "ILITOTAL_m (monthly avg)",
+    color = "Model_m"
+  ) +
+  theme_minimal()
+
+print(plt_m)
+
+plot_file_m <- file.path(vis_dir_m, "base_vs_fitted_m_from_weekly.png")
+ggsave(
+  filename = plot_file_m,
+  plot = plt_m,
+  width = 10, height = 6, bg = "white"
+)
+
+cat(" - 월별 시각화 완료 및", plot_file_m, "저장\n")
+
+################################################################################
+# (8) 요약
+################################################################################
+
+cat("\n===== 최종 요약 (Monthly from Weekly) =====\n")
+cat("1) 'predicted_test_base_m_from_weekly.csv' 에 월별(평균) 예측 결과 저장 완료\n")
+cat("2) 'accuracy_result_base_m_from_weekly.csv' 에 월별 MAE 결과 저장 완료\n")
+cat("3) 'base_vs_fitted_m_from_weekly.png' 시각화 파일 생성\n")
+cat("===== Monthly 분석 스크립트 종료 =====\n")
+```
